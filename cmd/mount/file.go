@@ -3,169 +3,61 @@
 package mount
 
 import (
-	"sync"
-	"sync/atomic"
+	"context"
+	"io"
 	"time"
 
 	"bazil.org/fuse"
 	fusefs "bazil.org/fuse/fs"
-	"github.com/ncw/rclone/fs"
-	"github.com/pkg/errors"
-	"golang.org/x/net/context"
+	"github.com/ncw/rclone/cmd/mountlib"
+	"github.com/ncw/rclone/fs/log"
+	"github.com/ncw/rclone/vfs"
 )
 
 // File represents a file
 type File struct {
-	size           int64        // size of file - read and written with atomic int64 - must be 64 bit aligned
-	d              *Dir         // parent directory - read only
-	mu             sync.RWMutex // protects the following
-	o              fs.Object    // NB o may be nil if file is being written
-	writers        int          // number of writers for this file
-	pendingModTime time.Time    // will be applied once o becomes available, i.e. after file was written
-}
-
-// newFile creates a new File
-func newFile(d *Dir, o fs.Object) *File {
-	return &File{
-		d: d,
-		o: o,
-	}
-}
-
-// rename should be called to update f.o and f.d after a rename
-func (f *File) rename(d *Dir, o fs.Object) {
-	f.mu.Lock()
-	f.o = o
-	f.d = d
-	f.mu.Unlock()
-}
-
-// addWriters increments or decrements the writers
-func (f *File) addWriters(n int) {
-	f.mu.Lock()
-	f.writers += n
-	f.mu.Unlock()
+	*vfs.File
 }
 
 // Check interface satisfied
 var _ fusefs.Node = (*File)(nil)
 
 // Attr fills out the attributes for the file
-func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	a.Gid = gid
-	a.Uid = uid
-	a.Mode = filePerms
-	// if o is nil it isn't valid yet, so return the size so far
-	if f.o == nil {
-		a.Size = uint64(atomic.LoadInt64(&f.size))
-		if !noModTime && !f.pendingModTime.IsZero() {
-			a.Atime = f.pendingModTime
-			a.Mtime = f.pendingModTime
-			a.Ctime = f.pendingModTime
-			a.Crtime = f.pendingModTime
-		}
-	} else {
-		a.Size = uint64(f.o.Size())
-		if !noModTime {
-			modTime := f.o.ModTime()
-			a.Atime = modTime
-			a.Mtime = modTime
-			a.Ctime = modTime
-			a.Crtime = modTime
-		}
-	}
-	a.Blocks = (a.Size + 511) / 512
-	fs.Debugf(f.o, "File.Attr %+v", a)
+func (f *File) Attr(ctx context.Context, a *fuse.Attr) (err error) {
+	defer log.Trace(f, "")("a=%+v, err=%v", a, &err)
+	a.Valid = mountlib.AttrTimeout
+	modTime := f.File.ModTime()
+	Size := uint64(f.File.Size())
+	Blocks := (Size + 511) / 512
+	a.Gid = f.VFS().Opt.GID
+	a.Uid = f.VFS().Opt.UID
+	a.Mode = f.VFS().Opt.FilePerms
+	a.Size = Size
+	a.Atime = modTime
+	a.Mtime = modTime
+	a.Ctime = modTime
+	a.Crtime = modTime
+	a.Blocks = Blocks
 	return nil
 }
 
 // Check interface satisfied
 var _ fusefs.NodeSetattrer = (*File)(nil)
 
-// Setattr handles attribute changes from FUSE. Currently supports ModTime only.
-func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
-	if noModTime {
-		return nil
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if req.Valid.MtimeNow() {
-		f.pendingModTime = time.Now()
-	} else if req.Valid.Mtime() {
-		f.pendingModTime = req.Mtime
-	}
-
-	if f.o != nil {
-		return f.applyPendingModTime()
-	}
-
-	// queue up for later, hoping f.o becomes available
-	return nil
-}
-
-// call with the mutex held
-func (f *File) applyPendingModTime() error {
-	defer func() { f.pendingModTime = time.Time{} }()
-
-	if f.pendingModTime.IsZero() {
-		return nil
-	}
-
-	if f.o == nil {
-		return errors.New("Cannot apply ModTime, file object is not available")
-	}
-
-	err := f.o.SetModTime(f.pendingModTime)
-	switch err {
-	case nil:
-		fs.Debugf(f.o, "File.applyPendingModTime OK")
-	case fs.ErrorCantSetModTime:
-		// do nothing, in order to not break "touch somefile" if it exists already
-	default:
-		fs.Errorf(f.o, "File.applyPendingModTime error: %v", err)
-		return err
-	}
-
-	return nil
-}
-
-// Update the size while writing
-func (f *File) written(n int64) {
-	atomic.AddInt64(&f.size, n)
-}
-
-// Update the object when written
-func (f *File) setObject(o fs.Object) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.o = o
-	_ = f.applyPendingModTime()
-	f.d.addObject(o, f)
-}
-
-// Wait for f.o to become non nil for a short time returning it or an
-// error
-//
-// Call without the mutex held
-func (f *File) waitForValidObject() (o fs.Object, err error) {
-	for i := 0; i < 50; i++ {
-		f.mu.Lock()
-		o = f.o
-		writers := f.writers
-		f.mu.Unlock()
-		if o != nil {
-			return o, nil
+// Setattr handles attribute changes from FUSE. Currently supports ModTime and Size only
+func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) (err error) {
+	defer log.Trace(f, "a=%+v", req)("err=%v", &err)
+	if !f.VFS().Opt.NoModTime {
+		if req.Valid.Mtime() {
+			err = f.File.SetModTime(req.Mtime)
+		} else if req.Valid.MtimeNow() {
+			err = f.File.SetModTime(time.Now())
 		}
-		if writers == 0 {
-			return nil, errors.New("can't open file - writer failed")
-		}
-		time.Sleep(100 * time.Millisecond)
 	}
-	return nil, fuse.ENOENT
+	if req.Valid.Size() {
+		err = f.File.Truncate(int64(req.Size))
+	}
+	return translateError(err)
 }
 
 // Check interface satisfied
@@ -173,48 +65,21 @@ var _ fusefs.NodeOpener = (*File)(nil)
 
 // Open the file for read or write
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fh fusefs.Handle, err error) {
-	// if o is nil it isn't valid yet
-	o, err := f.waitForValidObject()
-	if err != nil {
-		return nil, err
-	}
-	fs.Debugf(o, "File.Open %v", req.Flags)
+	defer log.Trace(f, "flags=%v", req.Flags)("fh=%v, err=%v", &fh, &err)
 
-	switch {
-	case req.Flags.IsReadOnly():
-		if noSeek {
-			resp.Flags |= fuse.OpenNonSeekable
-		}
-		fh, err = newReadFileHandle(o)
-		err = errors.Wrap(err, "open for read")
-	case req.Flags.IsWriteOnly() || (req.Flags.IsReadWrite() && (req.Flags&fuse.OpenTruncate) != 0):
+	// fuse flags are based off syscall flags as are os flags, so
+	// should be compatible
+	handle, err := f.File.Open(int(req.Flags))
+	if err != nil {
+		return nil, translateError(err)
+	}
+
+	// See if seeking is supported and set FUSE hint accordingly
+	if _, err = handle.Seek(0, io.SeekCurrent); err != nil {
 		resp.Flags |= fuse.OpenNonSeekable
-		src := newCreateInfo(f.d.f, o.Remote())
-		fh, err = newWriteFileHandle(f.d, f, src)
-		err = errors.Wrap(err, "open for write")
-	case req.Flags.IsReadWrite():
-		err = errors.New("can't open for read and write simultaneously")
-	default:
-		err = errors.Errorf("can't figure out how to open with flags %v", req.Flags)
 	}
 
-	/*
-	   // File was opened in append-only mode, all writes will go to end
-	   // of file. OS X does not provide this information.
-	   OpenAppend    OpenFlags = syscall.O_APPEND
-	   OpenCreate    OpenFlags = syscall.O_CREAT
-	   OpenDirectory OpenFlags = syscall.O_DIRECTORY
-	   OpenExclusive OpenFlags = syscall.O_EXCL
-	   OpenNonblock  OpenFlags = syscall.O_NONBLOCK
-	   OpenSync      OpenFlags = syscall.O_SYNC
-	   OpenTruncate  OpenFlags = syscall.O_TRUNC
-	*/
-
-	if err != nil {
-		fs.Errorf(o, "File.Open failed: %v", err)
-		return nil, err
-	}
-	return fh, nil
+	return &FileHandle{handle}, nil
 }
 
 // Check interface satisfied
@@ -223,6 +88,41 @@ var _ fusefs.NodeFsyncer = (*File)(nil)
 // Fsync the file
 //
 // Note that we don't do anything except return OK
-func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) (err error) {
+	defer log.Trace(f, "")("err=%v", &err)
 	return nil
 }
+
+// Getxattr gets an extended attribute by the given name from the
+// node.
+//
+// If there is no xattr by that name, returns fuse.ErrNoXattr.
+func (f *File) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
+	return fuse.ENOSYS // we never implement this
+}
+
+var _ fusefs.NodeGetxattrer = (*File)(nil)
+
+// Listxattr lists the extended attributes recorded for the node.
+func (f *File) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *fuse.ListxattrResponse) error {
+	return fuse.ENOSYS // we never implement this
+}
+
+var _ fusefs.NodeListxattrer = (*File)(nil)
+
+// Setxattr sets an extended attribute with the given name and
+// value for the node.
+func (f *File) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
+	return fuse.ENOSYS // we never implement this
+}
+
+var _ fusefs.NodeSetxattrer = (*File)(nil)
+
+// Removexattr removes an extended attribute for the name.
+//
+// If there is no xattr by that name, returns fuse.ErrNoXattr.
+func (f *File) Removexattr(ctx context.Context, req *fuse.RemovexattrRequest) error {
+	return fuse.ENOSYS // we never implement this
+}
+
+var _ fusefs.NodeRemovexattrer = (*File)(nil)

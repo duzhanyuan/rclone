@@ -2,18 +2,20 @@ package check
 
 import (
 	"github.com/ncw/rclone/cmd"
-	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/operations"
 	"github.com/spf13/cobra"
 )
 
 // Globals
 var (
 	download = false
+	oneway   = false
 )
 
 func init() {
 	cmd.Root.AddCommand(commandDefintion)
 	commandDefintion.Flags().BoolVarP(&download, "download", "", download, "Check by downloading rather than with hash.")
+	commandDefintion.Flags().BoolVarP(&oneway, "one-way", "", oneway, "Check one way only, source files must exist on remote")
 }
 
 var commandDefintion = &cobra.Command{
@@ -31,15 +33,19 @@ If you supply the --download flag, it will download the data from
 both remotes and check them against each other on the fly.  This can
 be useful for remotes that don't support hashes or if you really want
 to check all the data.
+
+If you supply the --one-way flag, it will only check that files in source
+match the files in destination, not the other way around. Meaning extra files in
+destination that are not in the source will not trigger an error.
 `,
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(2, 2, command, args)
 		fsrc, fdst := cmd.NewFsSrcDst(args)
 		cmd.Run(false, false, command, func() error {
 			if download {
-				return fs.CheckDownload(fdst, fsrc)
+				return operations.CheckDownload(fdst, fsrc, oneway)
 			}
-			return fs.Check(fdst, fsrc)
+			return operations.Check(fdst, fsrc, oneway)
 		})
 	},
 }

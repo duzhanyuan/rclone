@@ -1,7 +1,7 @@
 ---
 title: "Install"
 description: "Rclone Installation"
-date: "2016-03-28"
+date: "2018-08-28"
 ---
 
 # Install #
@@ -11,13 +11,26 @@ Rclone is a Go program and comes as a single binary file.
 ## Quickstart ##
 
   * [Download](/downloads/) the relevant binary.
-  * Unpack and the `rclone` binary.
+  * Extract the `rclone` or `rclone.exe` binary from the archive
   * Run `rclone config` to setup. See [rclone config docs](/docs/) for more details.
 
 See below for some expanded Linux / macOS instructions.
 
 See the [Usage section](/docs/) of the docs for how to use rclone, or
 run `rclone -h`.
+
+## Script installation ##
+
+To install rclone on Linux/macOS/BSD systems, run:
+
+    curl https://rclone.org/install.sh | sudo bash
+
+For beta installation, run:
+
+    curl https://rclone.org/install.sh | sudo bash -s beta
+
+Note that this script checks the version of rclone installed first and
+won't re-download if not needed.
 
 ## Linux installation from precompiled binary ##
 
@@ -55,7 +68,10 @@ Unzip the download and cd to the extracted folder.
 
 Move rclone to your $PATH. You will be prompted for your password.
 
+    sudo mkdir -p /usr/local/bin
     sudo mv rclone /usr/local/bin/
+
+(the `mkdir` command is safe to run, even if the directory already exists).
 
 Remove the leftover files.
 
@@ -67,16 +83,25 @@ Run `rclone config` to setup. See [rclone config docs](/docs/) for more details.
 
 ## Install from source ##
 
-Make sure you have at least [Go](https://golang.org/) 1.5 installed.
-Make sure your `GOPATH` is set, then:
+Make sure you have at least [Go](https://golang.org/) 1.7
+installed.  [Download go](https://golang.org/dl/) if necessary.  The
+latest release is recommended. Then
+
+    git clone https://github.com/ncw/rclone.git
+    cd rclone
+    go build
+    ./rclone version
+
+You can also build and install rclone in the
+[GOPATH](https://github.com/golang/go/wiki/GOPATH) (which defaults to
+`~/go`) with:
 
     go get -u -v github.com/ncw/rclone
 
-and this will build the binary in `$GOPATH/bin`.  If you have built
-rclone before then you will want to update its dependencies first with
-this
-
-    go get -u -v github.com/ncw/rclone/...
+and this will build the binary in `$GOPATH/bin` (`~/go/bin/rclone` by
+default) after downloading the source to
+`$GOPATH/src/github.com/ncw/rclone` (`~/go/src/github.com/ncw/rclone`
+by default).
 
 ## Installation with Ansible ##
 
@@ -93,57 +118,3 @@ Instructions
       roles:
           - rclone
 ```
-
-## Installation with snap ##
-
-### Quickstart ###
-
-  * install Snapd on your distro using the instructions below
-  * sudo snap install rclone --classic 
-  * Run `rclone config` to setup. See [rclone config docs](/docs/) for more details.
-
-See below for how to install snapd if it isn't already installed
-
-#### Arch ####
-
-    sudo pacman -S snapd
-
-enable the snapd systemd service:
-
-    sudo systemctl enable --now snapd.socket
-
-#### Debian / Ubuntu ####
-
-    sudo apt install snapd
-
-#### Fedora ####
-
-    sudo dnf copr enable zyga/snapcore
-    sudo dnf install snapd
-
-enable the snapd systemd service:
-
-    sudo systemctl enable --now snapd.service
-
-SELinux support is in beta, so currently:
-
-    sudo setenforce 0
-
-to persist, edit `/etc/selinux/config` to set `SELINUX=permissive` and reboot.
-
-#### Gentoo ####
-
-Install the [gentoo-snappy overlay](https://github.com/zyga/gentoo-snappy).
-
-#### OpenEmbedded/Yocto ####
-
-Install the [snap meta layer](https://github.com/morphis/meta-snappy/blob/master/README.md).
-
-#### openSUSE ####
-
-    sudo zypper addrepo https://download.opensuse.org/repositories/system:/snappy/openSUSE_Leap_42.2/ snappy
-    sudo zypper install snapd
-
-#### OpenWrt ####
-
-Enable the snap-openwrt feed.

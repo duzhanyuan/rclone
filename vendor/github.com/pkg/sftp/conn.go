@@ -36,6 +36,17 @@ type clientConn struct {
 	wg         sync.WaitGroup
 	sync.Mutex                          // protects inflight
 	inflight   map[uint32]chan<- result // outstanding requests
+
+	closed chan struct{}
+	err    error
+}
+
+// Wait blocks until the conn has shut down, and return the error
+// causing the shutdown. It can be called concurrently from multiple
+// goroutines.
+func (c *clientConn) Wait() error {
+	<-c.closed
+	return c.err
 }
 
 // Close closes the SFTP session.
@@ -56,9 +67,9 @@ func (c *clientConn) loop() {
 // appropriate channel.
 func (c *clientConn) recv() error {
 	defer func() {
-		c.Lock()
+		c.conn.Lock()
 		c.conn.Close()
-		c.Unlock()
+		c.conn.Unlock()
 	}()
 	for {
 		typ, data, err := c.recvPacket()
@@ -93,7 +104,7 @@ type idmarshaler interface {
 }
 
 func (c *clientConn) sendPacket(p idmarshaler) (byte, []byte, error) {
-	ch := make(chan result, 1)
+	ch := make(chan result, 2)
 	c.dispatchRequest(ch, p)
 	s := <-ch
 	return s.typ, s.data, s.err
@@ -102,11 +113,13 @@ func (c *clientConn) sendPacket(p idmarshaler) (byte, []byte, error) {
 func (c *clientConn) dispatchRequest(ch chan<- result, p idmarshaler) {
 	c.Lock()
 	c.inflight[p.id()] = ch
+	c.Unlock()
 	if err := c.conn.sendPacket(p); err != nil {
+		c.Lock()
 		delete(c.inflight, p.id())
+		c.Unlock()
 		ch <- result{err: err}
 	}
-	c.Unlock()
 }
 
 // broadcastErr sends an error to all goroutines waiting for a response.
@@ -120,12 +133,14 @@ func (c *clientConn) broadcastErr(err error) {
 	for _, ch := range listeners {
 		ch <- result{err: err}
 	}
+	c.err = err
+	close(c.closed)
 }
 
 type serverConn struct {
 	conn
 }
 
-func (s *serverConn) sendError(p id, err error) error {
+func (s *serverConn) sendError(p ider, err error) error {
 	return s.sendPacket(statusFromError(p, err))
 }

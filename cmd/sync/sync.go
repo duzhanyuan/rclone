@@ -2,12 +2,17 @@ package sync
 
 import (
 	"github.com/ncw/rclone/cmd"
-	"github.com/ncw/rclone/fs"
+	"github.com/ncw/rclone/fs/sync"
 	"github.com/spf13/cobra"
+)
+
+var (
+	createEmptySrcDirs = false
 )
 
 func init() {
 	cmd.Root.AddCommand(commandDefintion)
+	commandDefintion.Flags().BoolVarP(&createEmptySrcDirs, "create-empty-src-dirs", "", createEmptySrcDirs, "Create empty source dirs on destination after sync")
 }
 
 var commandDefintion = &cobra.Command{
@@ -32,12 +37,14 @@ extended explanation in the ` + "`" + `copy` + "`" + ` command above if unsure.
 
 If dest:path doesn't exist, it is created and the source:path contents
 go there.
+
+**Note**: Use the ` + "`-P`" + `/` + "`--progress`" + ` flag to view real-time transfer statistics
 `,
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(2, 2, command, args)
 		fsrc, fdst := cmd.NewFsSrcDst(args)
 		cmd.Run(true, true, command, func() error {
-			return fs.Sync(fdst, fsrc)
+			return sync.Sync(fdst, fsrc, createEmptySrcDirs)
 		})
 	},
 }
